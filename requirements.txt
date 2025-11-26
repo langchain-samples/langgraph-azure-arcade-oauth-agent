@@ -1,9 +1,11 @@
 aiohttp
+arcadepy  
 azure-cosmos
 cryptography
 fastapi
 httpx
 itsdangerous
+langchain
 langchain-core
 langchain-mcp-adapters
 langchain-openai

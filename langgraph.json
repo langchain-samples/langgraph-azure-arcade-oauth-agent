@@ -1,7 +1,7 @@
 {
   "dependencies": ["."],
   "graphs": {
-    "AAD Agent": "./backend/agent.py:create_graph"
+    "AAD Agent": "./backend/agent.py:create_arcade_agent"
   },
   "env": ".env",
   "http": {
