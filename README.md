@@ -1,6 +1,6 @@
-# Azure AD Authentication with LangGraph
+# Azure AD Authentication with LangGraph + Arcade.dev Tools
 
-This project demonstrates Azure AD (Microsoft Entra ID) authentication integration with LangGraph API, using MSAL for token management and Cosmos DB for persistent token storage.
+This project demonstrates Azure AD (Microsoft Entra ID) authentication integration with LangGraph API, enhanced with Arcade.dev tools for OAuth-based integrations. It uses MSAL for token management and Cosmos DB for persistent token storage.
 
 ## Setup
 
@@ -12,7 +12,11 @@ This project demonstrates Azure AD (Microsoft Entra ID) authentication integrati
 
 3. We also use OpenAI models in this application, so add your OpenAI API Key as well.
 
-4. Generate a session secret to store as `SESSION_SECRET` in your env file. You can do this in a bash terminal by running:
+4. Add your Arcade configuration (see Arcade.dev Configuration section below):
+   - `ARCADE_API_KEY` - Your Arcade API key
+   - `ARCADE_MCP_URL` - Your Arcade MCP gateway URL
+
+5. Generate a session secret to store as `SESSION_SECRET` in your env file. You can do this in a bash terminal by running:
 
     ```bash
     python -c "import secrets; print(secrets.token_urlsafe(32))"
@@ -96,22 +100,155 @@ This project demonstrates Azure AD (Microsoft Entra ID) authentication integrati
 
 </details>
 
+### Arcade.dev Configuration
+
+This application uses [Arcade.dev](https://arcade.dev) to provide OAuth-based tools for accessing external services (Notion, Google, Microsoft, Slack, etc.). Arcade provides an MCP (Model Context Protocol) gateway that exposes tools as LangChain-compatible functions, while our custom verifier ensures user-scoped OAuth security.
+
+<details>
+<summary>1. Create an Arcade Account & Get API Key</summary>
+
+1. Sign up at [arcade.dev](https://arcade.dev)
+2. Create a new project or use an existing one
+3. Navigate to the [API Keys section](https://api.arcade.dev/dashboard/settings/api-keys) and create an API key
+4. Add this to your `.env` file as `ARCADE_API_KEY`
+
+</details>
+
+<details>
+<summary>2. Create an MCP Gateway</summary>
+
+Arcade exposes tools via MCP (Model Context Protocol) servers. You need to create a gateway that bundles the tools you want to use.
+
+1. Navigate to [MCP Gateways](https://api.arcade.dev/dashboard/mcp/gateways) in the Arcade Dashboard
+2. Click **Create Gateway**
+3. Select the toolkits you want to include (e.g., Notion, Google, Slack)
+4. After creating the gateway, copy the **Gateway URL** - it will look like:
+   ```
+   https://api.arcade.dev/mcp/gw_xxxxxxxxxxxxx
+   ```
+5. Add this to your `.env` file as `ARCADE_MCP_URL`
+
+**How MCP Integration Works:**
+
+The application uses `langchain-mcp-adapters` to connect to Arcade's MCP gateway:
+
+```python
+# backend/arcade_tools.py
+from langchain_mcp_adapters.client import MultiServerMCPClient
+
+client = MultiServerMCPClient({
+    "arcade": {
+        "transport": "streamable_http",
+        "url": ARCADE_MCP_URL,
+        "headers": {
+            "Authorization": f"Bearer {ARCADE_API_KEY}",
+            "Arcade-User-Id": user_id,  # Scopes OAuth to authenticated user
+        }
+    }
+})
+tools = await client.get_tools()
+```
+
+The `Arcade-User-Id` header ensures that OAuth tokens are scoped per-user - each user authorizes their own access to external services.
+
+</details>
+
+<details>
+<summary>3. Configure Custom OAuth Providers (Required for Production)</summary>
+
+**Important:** Arcade's default OAuth apps only work with Arcade's built-in user verifier. For multi-user production apps with a custom verifier, you **must** configure your own OAuth applications.
+
+**Example: Setting up Notion OAuth**
+
+1. Go to [Notion Developers](https://www.notion.so/my-integrations) and create a new integration
+2. Set the integration type to **Public**
+3. Configure the OAuth redirect URL to Arcade's callback:
+   ```
+   https://cloud.arcade.dev/api/v1/oauth/callback
+   ```
+4. Note your **OAuth Client ID** and **OAuth Client Secret**
+5. In Arcade Dashboard, navigate to [Auth > OAuth Providers](https://api.arcade.dev/dashboard/auth/providers)
+6. Click **Add Provider** and select Notion
+7. Enter your Client ID and Client Secret
+8. Save the configuration
+
+**Other Providers:**
+
+Follow similar steps for other OAuth providers:
+- **Google**: [Arcade's Google configuration guide](https://docs.arcade.dev/home/auth-providers/google)
+- **Microsoft**: [Arcade's Microsoft configuration guide](https://docs.arcade.dev/home/auth-providers/microsoft)
+- **Slack**: [Arcade's Slack configuration guide](https://docs.arcade.dev/home/auth-providers/slack)
+- **Full list**: [Arcade auth providers documentation](https://docs.arcade.dev/home/auth-providers)
+
+</details>
+
+<details>
+<summary>4. Configure Custom User Verifier</summary>
+
+The custom user verifier is a security feature that prevents phishing attacks by confirming the user's identity during OAuth flows. When a user completes an OAuth flow, Arcade redirects them to your verifier endpoint to confirm their identity matches who initiated the flow.
+
+**Setup Steps:**
+
+1. Navigate to [Auth > Settings](https://api.arcade.dev/dashboard/auth/settings) in the Arcade Dashboard
+2. Under **Verification Method**, select **Custom user verifier**
+3. Enter your verifier URL:
+   - For local development: `http://localhost:2024/arcade/verify`
+   - For production: `https://your-deployment-url/arcade/verify`
+
+**How the Verifier Works:**
+
+The `/arcade/verify` endpoint in `backend/app.py`:
+1. Receives the `flow_id` from Arcade's redirect
+2. Extracts the `user_id` from the session (set during Azure AD login)
+3. Calls `arcade_client.auth.confirm_user(flow_id, user_id)` to verify identity
+4. Arcade completes the OAuth flow once verified
+
+</details>
+
+<details>
+<summary>5. OAuth Flow Explained</summary>
+
+When a user requests an action requiring OAuth (e.g., "search my Notion workspace"):
+
+1. **Tool Detection**: The Arcade tool detects the user hasn't authorized the service
+2. **Auth URL Returned**: The agent returns an authorization URL to the user
+3. **User Authorizes**: User clicks the link and completes OAuth consent on the external service (e.g., Notion)
+4. **Arcade Callback**: The external service redirects to Arcade's callback URL
+5. **Custom Verifier**: Arcade redirects to your `/arcade/verify` endpoint with a `flow_id`
+6. **Identity Confirmation**: Your verifier confirms the session `user_id` matches the flow initiator
+7. **Flow Complete**: Arcade stores the OAuth token, scoped to that user
+8. **Future Requests**: Subsequent tool calls automatically use the cached token
+
+This flow ensures:
+- **Security**: Only the user who initiated the flow can complete it
+- **User Scoping**: Each user's OAuth tokens are isolated
+- **Seamless UX**: After first authorization, tools work automatically
+
+</details>
+
+**Reference Documentation:**
+- [Arcade Custom User Verifier](https://docs.arcade.dev/home/auth/secure-auth-production)
+- [Arcade MCP Gateway](https://docs.arcade.dev/home/mcp)
+- [Arcade Toolkits](https://docs.arcade.dev/toolkits)
+- [LangChain MCP Adapters](https://github.com/langchain-ai/langchain-mcp-adapters)
+
 ## Architecture
 
 This application consists of:
 
-1. LangGraph Server backend with custom FastAPI routes
-    - `backend/agent.py` contains our LangGraph agent
-    - `backend/app.py` contains our FastAPI authentication routes
-    - `backend/auth.py` contains our LangGraph authentication logic, as well as helpers for our agent to be authorized to access Azure resources
-    - `backend/secrets.py` contains logic to store sensitive access tokens in secure CosmosDB storage
-    - `backend/tools.py` contains tools that our LangGraph agent can use, with most tools accessing Azure resources that require authorization.
+1. **LangGraph Server backend** with custom FastAPI routes
+    - `backend/agent.py` - LangGraph agent with Arcade MCP tools (uses graph factory pattern for runtime user context)
+    - `backend/arcade_tools.py` - Arcade MCP gateway integration using `langchain-mcp-adapters`
+    - `backend/app.py` - FastAPI routes including Azure AD callbacks and `/arcade/verify` custom verifier
+    - `backend/auth.py` - LangGraph authentication middleware using Azure AD
+    - `backend/secrets.py` - Secure token storage in CosmosDB
+    - `backend/tools.py` - Legacy Azure OBO tools (kept for reference)
 
-2. Next.js Frontend
-    - `frontend/app/auth/callback` contains our frontend callback page. This our Redirect URI we set in Azure, which determines where Azure will send our authorization code after we complete the browser login process. Notably, the Redirect URI must be a frontend route.
-    - `frontend/app/page.tsx` represents our main page
-    - `frontend/components/Chat.tsx` defines our main Chat component and message logic
-    - `frontend/lib/auth.tsx` contains our handlers for calling our backend authentication endpoints to login using OAuth2.0 Auth Code Flow
+2. **Next.js Frontend**
+    - `frontend/app/auth/callback` - Redirect URI for Azure AD authorization code flow
+    - `frontend/app/page.tsx` - Main application page
+    - `frontend/components/Chat.tsx` - Chat component with message handling
+    - `frontend/lib/auth.tsx` - Frontend authentication handlers
 
 ## Running the Application
 
@@ -152,3 +289,11 @@ Note: These scripts should be modified in production settings. They will start y
 3. Navigate to `localhost:3000` to interact with the application.
 
 NOTE: Starting manually will show the logs in your terminals for live debugging
+
+### Testing Arcade Tools
+
+1. Log in with your Azure AD credentials
+2. Ask the agent to perform an action requiring OAuth (e.g., "List my Notion pages")
+3. The agent will return an authorization URL - click it to authorize
+4. After authorization, you'll be redirected through the custom verifier
+5. Return to the chat and retry your request - it should now work!

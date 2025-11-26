@@ -13,6 +13,9 @@ from starlette.middleware.sessions import SessionMiddleware
 from backend.auth import verify_id_token, msal_app, AAD_REDIRECT_URI, AAD_APPLICATION_URI, token_cache, get_refreshed_azure_tokens, extract_info_from_cache
 from backend.secrets import save_token_cache_to_cosmos, get_cosmos_container, close_cosmos_connections
 
+# Arcade imports
+from arcadepy import AsyncArcade
+
 
 load_dotenv(override=True)
 
@@ -170,3 +173,120 @@ async def get_tokens(request: Request):
         
     except Exception as e:
         return JSONResponse({"error": f"❌ Token Issuance Error: {str(e)}"}, status_code=401)
+
+
+@app.get("/arcade/verify")
+async def arcade_verify(request: Request, flow_id: str):
+    """
+    Arcade custom user verifier endpoint.
+    
+    This endpoint is called by Arcade after a user completes an OAuth flow.
+    It verifies that the user who completed the OAuth flow is the same user
+    who initiated it, preventing phishing attacks.
+    
+    Reference: https://docs.arcade.dev/home/auth/secure-auth-production
+    
+    Args:
+        flow_id: The OAuth flow ID from Arcade (query parameter)
+    
+    Returns:
+        Redirect to Arcade's next_uri or success page
+    """
+    # Validate required parameters
+    if not flow_id:
+        return Response("❌ Arcade Verify Error: Missing required parameter: flow_id", status_code=400)
+    
+    # Extract user_id from session (established during Azure AD login)
+    # This must match the user_id that was passed when the Arcade tool was called
+    user_id = request.session.get("user_id")
+    
+    if not user_id:
+        return Response(
+            "❌ Arcade Verify Error: User not authenticated. Please log in first.",
+            status_code=401
+        )
+    
+    # Confirm the user's identity with Arcade (server-side, uses ARCADE_API_KEY)
+    try:
+        client = AsyncArcade()  # Looks for ARCADE_API_KEY environment variable
+        
+        result = await client.auth.confirm_user(
+            flow_id=flow_id,
+            user_id=user_id
+        )
+        
+        # Wait for the authorization to complete and verify status
+        auth_response = await client.auth.wait_for_completion(result.auth_id)
+        
+        if auth_response.status == "completed":
+            # Success! Redirect to Arcade's next step or render success page
+            # You can customize this to redirect to your frontend or show a success message
+            from fastapi.responses import RedirectResponse, HTMLResponse
+            
+            # Option 1: Redirect to Arcade's next_uri (recommended)
+            if result.next_uri:
+                return RedirectResponse(url=result.next_uri)
+            
+            # Option 2: Show a simple success page
+            return HTMLResponse(
+                content="""
+                <html>
+                    <head>
+                        <title>Authorization Successful</title>
+                        <style>
+                            body {
+                                font-family: system-ui, -apple-system, sans-serif;
+                                display: flex;
+                                justify-content: center;
+                                align-items: center;
+                                height: 100vh;
+                                margin: 0;
+                                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                            }
+                            .card {
+                                background: white;
+                                padding: 2rem;
+                                border-radius: 8px;
+                                box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+                                text-align: center;
+                                max-width: 400px;
+                            }
+                            h1 { color: #10b981; margin-top: 0; }
+                            p { color: #6b7280; }
+                            .close-btn {
+                                margin-top: 1rem;
+                                padding: 0.5rem 1rem;
+                                background: #667eea;
+                                color: white;
+                                border: none;
+                                border-radius: 4px;
+                                cursor: pointer;
+                            }
+                        </style>
+                    </head>
+                    <body>
+                        <div class="card">
+                            <h1>✓ Authorization Successful</h1>
+                            <p>You have successfully authorized the application.</p>
+                            <p>You can close this window and return to the application.</p>
+                            <button class="close-btn" onclick="window.close()">Close Window</button>
+                        </div>
+                    </body>
+                </html>
+                """,
+                status_code=200
+            )
+        else:
+            # Authorization did not complete successfully
+            return Response(
+                f"❌ Arcade Verify Error: Authorization status: {auth_response.status}",
+                status_code=400
+            )
+            
+    except Exception as e:
+        # Log the error for debugging
+        print(f"❌ Arcade Verify Error: {str(e)}")
+        return Response(
+            f"❌ Arcade Verify Error: Failed to verify user. {str(e)}",
+            status_code=400
+        )
